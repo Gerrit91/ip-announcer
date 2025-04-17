@@ -105,13 +105,16 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	log.Info("successfully peered with localhost")
 
-	nlri, err := anypb.New(&api.IPAddressPrefix{
+	nlri, _ := anypb.New(&api.IPAddressPrefix{
 		Prefix:    ip,
 		PrefixLen: 32,
 	})
-	if err != nil {
-		return err
-	}
+	nhAttr, _ := anypb.New(&api.NextHopAttribute{
+		NextHop: "0.0.0.0",
+	})
+	originAttr, _ := anypb.New(&api.OriginAttribute{
+		Origin: 0,
+	})
 
 	_, err = s.AddPath(ctx, &api.AddPathRequest{
 		Path: &api.Path{
@@ -120,6 +123,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 				Afi:  api.Family_AFI_IP,
 				Safi: api.Family_SAFI_UNICAST,
 			},
+			Pattrs: []*anypb.Any{originAttr, nhAttr},
 		},
 	})
 	if err != nil {

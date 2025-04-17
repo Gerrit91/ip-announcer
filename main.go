@@ -9,17 +9,15 @@ import (
 	"slices"
 	"syscall"
 
-	api "github.com/osrg/gobgp/v3/api"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/anypb"
-
-	"gopkg.in/yaml.v3"
-
 	"github.com/metal-stack/metal-go/api/models"
 	hammerapi "github.com/metal-stack/metal-hammer/pkg/api"
 	"github.com/metal-stack/metal-lib/pkg/net"
 	"github.com/metal-stack/metal-lib/pkg/pointer"
+	api "github.com/osrg/gobgp/v3/api"
+	server "github.com/osrg/gobgp/v3/pkg/server"
+	"gopkg.in/yaml.v3"
+
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const (
@@ -29,13 +27,16 @@ const (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(log); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := run(ctx, log); err != nil {
 		log.Error("error running application", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger) error {
+func run(ctx context.Context, log *slog.Logger) error {
 	ip := os.Getenv("CONTROL_PLANE_IP")
 	if ip == "" {
 		return fmt.Errorf("no ip given to announce")
@@ -60,27 +61,30 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("no private primary unshared network found in install.yaml")
 	}
 
-	asn := pointer.SafeDeref(install.Networks[idx].Asn)
+	asn := uint32(pointer.SafeDeref(install.Networks[idx].Asn))
 
 	log.Info("figured out peer asn", "asn", asn)
 
-	conn, err := grpc.NewClient("127.0.0.1:179", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	s := server.NewBgpServer()
+	go s.Serve()
+
+	err = s.StartBgp(ctx, &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        asn,
+			ListenPort: -1,
+			RouterId:   "127.0.0.1",
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("failed to connect to bgp daemon: %w", err)
+		return fmt.Errorf("unable to start up bgp server: %w", err)
 	}
-	defer func() {
-		err = conn.Close()
-	}()
 
-	client := api.NewGobgpApiClient(conn)
+	log.Info("started bgp server", "port", 5000)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	_, err = client.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+	err = s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: "127.0.0.1",
-			PeerAsn:         uint32(asn),
+			PeerAsn:         asn,
 		},
 		Timers: &api.Timers{
 			Config: &api.TimersConfig{
@@ -109,9 +113,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	_, err = client.AddPath(ctx, &api.AddPathRequest{
+	_, err = s.AddPath(ctx, &api.AddPathRequest{
 		Path: &api.Path{
 			Nlri: nlri,
+			Family: &api.Family{
+				Afi:  api.Family_AFI_IP,
+				Safi: api.Family_SAFI_UNICAST,
+			},
 		},
 	})
 	if err != nil {
